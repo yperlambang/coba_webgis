@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WebGIS Surveilans Avian Influenza — Peternakan Ayam</title>
+
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- Leaflet.heat (heatmap) -->
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<!-- PapaParse (baca CSV) -->
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<!-- Turf.js (buffer & cluster spasial) -->
+<script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+
+<style>
+  :root { --bg:#0f1620; --panel:#172230; --ink:#e8eef5; --muted:#9fb0c3; --accent:#ff7a45; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; font-family:system-ui,Segoe UI,Roboto,sans-serif; color:var(--ink); background:var(--bg); }
+  #app { display:flex; height:100vh; }
+  #map { flex:1; }
+  #sidebar { width:320px; background:var(--panel); padding:16px; overflow-y:auto; box-shadow:-2px 0 8px rgba(0,0,0,.3); }
+  h1 { font-size:16px; margin:0 0 2px; }
+  .sub { font-size:11px; color:var(--muted); margin-bottom:14px; }
+  .card { background:#0f1a26; border:1px solid #233244; border-radius:10px; padding:12px; margin-bottom:12px; }
+  .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stat { background:#0f1a26; border:1px solid #233244; border-radius:10px; padding:10px; }
+  .stat .num { font-size:22px; font-weight:700; }
+  .stat .lbl { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
+  .stat.warn .num { color:var(--accent); }
+  label.row { display:flex; align-items:center; gap:8px; font-size:13px; margin:6px 0; cursor:pointer; }
+  .sec-title { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin:4px 0 8px; }
+  input[type=range] { width:100%; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px; background:#233244; color:var(--muted); }
+  #status { font-size:11px; color:var(--muted); }
+  #status b { color:#5ad19a; }
+  button { background:var(--accent); color:#1a1208; border:0; border-radius:8px; padding:8px 12px; font-weight:600; cursor:pointer; width:100%; }
+  .legend { font-size:12px; line-height:18px; }
+  .legend i { width:14px; height:14px; display:inline-block; margin-right:6px; border-radius:3px; opacity:.85; vertical-align:middle; }
+  .leaflet-popup-content { font-size:12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"></div>
+  <div id="sidebar">
+    <h1>WebGIS Surveilans Avian Influenza</h1>
+    <div class="sub">Peternakan unggas — pemantauan risiko AI</div>
+
+    <div class="card">
+      <div class="sec-title">Ringkasan (auto-update)</div>
+      <div class="stat-grid">
+        <div class="stat"><div class="num" id="s-farm">–</div><div class="lbl">Peternakan</div></div>
+        <div class="stat"><div class="num" id="s-ayam">–</div><div class="lbl">Total ayam</div></div>
+        <div class="stat warn"><div class="num" id="s-prev">–</div><div class="lbl">Prevalensi rata²</div></div>
+        <div class="stat warn"><div class="num" id="s-hot">–</div><div class="lbl">Hotspot (&gt;30%)</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="sec-title">Lapisan peta</div>
+      <label class="row"><input type="radio" name="layer" value="prev" checked> Prevalensi AI</label>
+      <label class="row"><input type="radio" name="layer" value="bios"> Skor biosekuriti</label>
+      <label class="row"><input type="radio" name="layer" value="jarak"> Jarak ke pasar</label>
+      <hr style="border-color:#233244;">
+      <label class="row"><input type="checkbox" id="chk-heat"> Heatmap kasus positif</label>
+      <label class="row"><input type="checkbox" id="chk-buffer"> Zona penyangga hotspot (3 km)</label>
+      <label class="row"><input type="checkbox" id="chk-cluster"> Deteksi cluster (DBSCAN)</label>
+    </div>
+
+    <div class="card">
+      <div class="sec-title">Ambang hotspot: <span id="thr-val">30</span>%</div>
+      <input type="range" id="thr" min="0" max="100" value="30">
+    </div>
+
+    <div class="card legend" id="legend"></div>
+
+    <div class="card">
+      <div class="sec-title">Pembaruan data</div>
+      <div id="status">Memuat…</div>
+      <div style="margin:8px 0;">Interval auto-refresh:
+        <select id="interval">
+          <option value="0">Mati</option>
+          <option value="30">30 detik</option>
+          <option value="60" selected>1 menit</option>
+          <option value="300">5 menit</option>
+        </select>
+      </div>
+      <button id="refresh">Muat ulang sekarang</button>
+    </div>
+
+    <div class="sub">Sumber data: <span class="pill">data_peternakan_ayam.csv</span></div>
+  </div>
+</div>
+
+<script>
+const DATA_URL = "data_peternakan_ayam.csv";
+const map = L.map("map").setView([-8.03, 112.22], 12);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+  attribution: "&copy; OpenStreetMap &copy; CARTO", maxZoom: 19
+}).addTo(map);
+
+let pointLayer = L.layerGroup().addTo(map);
+let heatLayer = null, bufferLayer = null, clusterLayer = null;
+let DATA = [];
+let timer = null;
+
+// ---- skala warna ----
+function rampYlOrRd(t){ // t 0..1
+  const stops = [[255,255,178],[254,204,92],[253,141,60],[240,59,32],[189,0,38]];
+  t = Math.max(0, Math.min(1, t));
+  const i = Math.min(stops.length-2, Math.floor(t*(stops.length-1)));
+  const f = t*(stops.length-1)-i;
+  const c = stops[i].map((v,k)=>Math.round(v+(stops[i+1][k]-v)*f));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+function rampBlues(t){ const v=Math.round(255-t*180); return `rgb(${v},${Math.round(v*0.95)},255)`; }
+function rampPurples(t){ const v=Math.round(255-t*170); return `rgb(${Math.round(220-t*100)},${v-40},255)`; }
+
+function activeLayer(){ return document.querySelector('input[name=layer]:checked').value; }
+function threshold(){ return +document.getElementById("thr").value/100; }
+
+// ---- render titik peternakan ----
+function renderPoints(){
+  pointLayer.clearLayers();
+  const mode = activeLayer();
+  const maxJarak = Math.max(...DATA.map(d=>d.jarak_pasar));
+  DATA.forEach(d=>{
+    let color, val;
+    if(mode==="prev"){ val=d.prev; color=rampYlOrRd(d.prev); }
+    else if(mode==="bios"){ val=d.biosekuriti; color=rampBlues(d.biosekuriti); }
+    else { val=d.jarak_pasar/maxJarak; color=rampPurples(val); }
+    const r = Math.max(5, Math.sqrt(d.n_ayam)/12);
+    const isHot = d.prev > threshold();
+    L.circleMarker([d.lat, d.lon], {
+      radius:r, color: isHot && mode==="prev" ? "#fff" : color,
+      weight: isHot && mode==="prev" ? 2 : 1, fillColor:color, fillOpacity:0.85
+    }).bindPopup(
+      `<b>${d.nama}</b> <span class="pill">${d.jenis}</span><br/>`+
+      `Populasi: ${(+d.n_ayam).toLocaleString("id")} ekor<br/>`+
+      `Diuji: ${d.n_uji} | Positif: ${d.positif}<br/>`+
+      `<b>Prevalensi AI: ${(d.prev*100).toFixed(0)}%</b><br/>`+
+      `Biosekuriti: ${d.biosekuriti} | Jarak pasar: ${d.jarak_pasar} km`
+    ).addTo(pointLayer);
+  });
+  drawLegend(mode);
+}
+
+// ---- heatmap ----
+function renderHeat(on){
+  if(heatLayer){ map.removeLayer(heatLayer); heatLayer=null; }
+  if(on){
+    const pts = DATA.filter(d=>d.positif>0).map(d=>[d.lat,d.lon,d.positif]);
+    heatLayer = L.heatLayer(pts,{radius:28,blur:30,max:Math.max(...DATA.map(d=>d.positif))}).addTo(map);
+  }
+}
+
+// ---- buffer zona penyangga (Turf) ----
+function renderBuffer(on){
+  if(bufferLayer){ map.removeLayer(bufferLayer); bufferLayer=null; }
+  if(on){
+    const hots = DATA.filter(d=>d.prev>threshold());
+    if(!hots.length) return;
+    const buffers = hots.map(d=>turf.buffer(turf.point([d.lon,d.lat]),3,{units:"kilometers"}));
+    let merged = buffers[0];
+    for(let i=1;i<buffers.length;i++) merged = turf.union(merged, buffers[i]);
+    bufferLayer = L.geoJSON(merged,{style:{color:"#ff4136",weight:1,fillOpacity:0.12}}).addTo(map);
+  }
+}
+
+// ---- cluster DBSCAN (Turf) ----
+function renderCluster(on){
+  if(clusterLayer){ map.removeLayer(clusterLayer); clusterLayer=null; }
+  if(on){
+    const pos = DATA.filter(d=>d.positif>0);
+    const fc = turf.featureCollection(pos.map(d=>turf.point([d.lon,d.lat],{prev:d.prev})));
+    const clustered = turf.clustersDbscan(fc, 2, {units:"kilometers", minPoints:3});
+    const palette = ["#e6194B","#3cb44b","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6"];
+    clusterLayer = L.geoJSON(clustered,{
+      pointToLayer:(f,latlng)=>{
+        const c = f.properties.cluster;
+        const col = c===undefined ? "#888" : palette[c%palette.length];
+        return L.circleMarker(latlng,{radius:7,color:"#000",weight:1,fillColor:col,fillOpacity:0.9});
+      }
+    }).addTo(map);
+  }
+}
+
+// ---- legend ----
+function drawLegend(mode){
+  const el = document.getElementById("legend");
+  let title, ramp;
+  if(mode==="prev"){ title="Prevalensi AI"; ramp=rampYlOrRd; }
+  else if(mode==="bios"){ title="Skor biosekuriti"; ramp=rampBlues; }
+  else { title="Jarak ke pasar (relatif)"; ramp=rampPurples; }
+  let html = `<div class="sec-title">${title}</div>`;
+  [0,0.25,0.5,0.75,1].forEach(t=>{
+    const lbl = mode==="prev" ? (t*100).toFixed(0)+"%" : t.toFixed(2);
+    html += `<div><i style="background:${ramp(t)}"></i>${lbl}</div>`;
+  });
+  el.innerHTML = html;
+}
+
+// ---- statistik ----
+function updateStats(){
+  const n = DATA.length;
+  const ayam = DATA.reduce((s,d)=>s+(+d.n_ayam),0);
+  const prev = DATA.reduce((s,d)=>s+d.prev,0)/n;
+  const hot = DATA.filter(d=>d.prev>threshold()).length;
+  document.getElementById("s-farm").textContent = n;
+  document.getElementById("s-ayam").textContent = (ayam/1000).toFixed(0)+"rb";
+  document.getElementById("s-prev").textContent = (prev*100).toFixed(0)+"%";
+  document.getElementById("s-hot").textContent = hot;
+}
+
+// ---- refresh semua layer aktif ----
+function refreshAll(){
+  renderPoints();
+  renderHeat(document.getElementById("chk-heat").checked);
+  renderBuffer(document.getElementById("chk-buffer").checked);
+  renderCluster(document.getElementById("chk-cluster").checked);
+  updateStats();
+}
+
+// ---- muat data CSV (cache-busting agar selalu versi terbaru) ----
+function loadData(){
+  document.getElementById("status").textContent = "Memuat data…";
+  Papa.parse(`${DATA_URL}?t=${Date.now()}`, {
+    download:true, header:true, dynamicTyping:true, skipEmptyLines:true,
+    complete:(res)=>{
+      DATA = res.data.filter(d=>d.lat && d.lon);
+      refreshAll();
+      const now = new Date().toLocaleTimeString("id");
+      document.getElementById("status").innerHTML = `<b>✓ Terbarui</b> ${now} — ${DATA.length} peternakan`;
+    },
+    error:(err)=>{
+      document.getElementById("status").innerHTML =
+        `⚠ Gagal memuat CSV.<br/>Jalankan lewat server lokal (lihat catatan di bawah).`;
+      console.error(err);
+    }
+  });
+}
+
+// ---- interval auto-refresh ----
+function setInterval_(){
+  if(timer){ clearInterval(timer); timer=null; }
+  const sec = +document.getElementById("interval").value;
+  if(sec>0) timer = setInterval(loadData, sec*1000);
+}
+
+// ---- event ----
+document.querySelectorAll('input[name=layer]').forEach(r=>r.addEventListener("change",renderPoints));
+document.getElementById("chk-heat").addEventListener("change",e=>renderHeat(e.target.checked));
+document.getElementById("chk-buffer").addEventListener("change",e=>renderBuffer(e.target.checked));
+document.getElementById("chk-cluster").addEventListener("change",e=>renderCluster(e.target.checked));
+document.getElementById("thr").addEventListener("input",e=>{
+  document.getElementById("thr-val").textContent=e.target.value;
+  renderPoints(); updateStats();
+  if(document.getElementById("chk-buffer").checked) renderBuffer(true);
+});
+document.getElementById("refresh").addEventListener("click",loadData);
+document.getElementById("interval").addEventListener("change",setInterval_);
+
+// ---- inisialisasi ----
+loadData();
+setInterval_();
+</script>
+</body>
+</html>
