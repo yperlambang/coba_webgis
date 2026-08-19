@@ -6,6 +6,7 @@
 <title>PoultryShield — MapLibre GL Proof of Concept</title>
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 <style>
   :root{
     color-scheme: light;
@@ -69,7 +70,7 @@
   .header-right{ display:flex; align-items:center; gap:10px; }
 
   .stats{
-    display:grid; grid-template-columns: repeat(5, 1fr); gap:1px;
+    display:grid; grid-template-columns: repeat(6, 1fr); gap:1px;
     background: var(--border); border-bottom: 1px solid var(--border);
   }
   .stat-tile{ background:var(--surface-1); padding:10px 16px; }
@@ -79,6 +80,8 @@
   .stat-tile.warning .value{ color:var(--status-warning); }
   .stat-tile.serious .value{ color:var(--status-serious); }
   .stat-tile.critical .value{ color:var(--status-critical); }
+  .stat-tile.exposed .value{ color:var(--status-warning); }
+  .stat-tile.exposed .label{ display:flex; align-items:center; gap:4px; }
 
   .body{ flex:1; display:flex; min-height:0; }
 
@@ -114,6 +117,11 @@
   .popup-name{ font-weight:700; margin-bottom:4px; }
   .popup-row{ display:flex; justify-content:space-between; gap:12px; color:var(--text-secondary); }
   .popup-status{ font-weight:700; }
+  .popup-exposed{
+    margin-top:6px; padding:4px 6px; border-radius:6px; font-size:11px; font-weight:600;
+    background: color-mix(in srgb, var(--status-warning) 20%, transparent);
+    color: var(--status-warning);
+  }
 
   footer{
     padding: 8px 20px; background:var(--surface-1); border-top:1px solid var(--border);
@@ -142,14 +150,22 @@
       <h2>Layer</h2>
       <label class="layer-row"><input type="checkbox" id="toggleFarms" checked> Titik peternakan</label>
       <label class="layer-row"><input type="checkbox" id="toggleCluster" checked> Pengelompokan (cluster)</label>
-      <label class="layer-row"><input type="checkbox" id="toggleZone" checked> Zona risiko (buffer 3 km)</label>
+      <label class="layer-row"><input type="checkbox" id="toggleZone" checked> Zona risiko gabungan (buffer 3 km)</label>
+      <label class="layer-row"><input type="checkbox" id="toggleExposed" checked> Farm terpapar (spatial join)</label>
+      <label class="layer-row"><input type="checkbox" id="toggleHeatmap"> Heatmap kepadatan risiko</label>
 
       <h2>Status biosekuriti</h2>
       <div id="legendList"></div>
 
-      <h2>Zona Risiko</h2>
+      <h2>Analisis Spasial (Turf.js)</h2>
       <div class="zone-note">
-        Lingkaran merah menandai radius 3&nbsp;km dari peternakan berstatus <strong>Bahaya Tinggi</strong> — ilustrasi analisis buffer/proximity untuk estimasi potensi penyebaran antar-farm.
+        Bukan sekadar styling — empat langkah geoprocessing berikut dihitung langsung di browser saat halaman dimuat, memakai <strong>Turf.js</strong> (library analisis spasial, satu keluarga dengan MapLibre/GeoLibre):
+      </div>
+      <div class="zone-note" style="margin-top:8px;">
+        <strong>1. Buffer</strong> — radius 3&nbsp;km dihitung di sekeliling tiap farm berstatus Bahaya Sedang/Tinggi.<br><br>
+        <strong>2. Overlay (union)</strong> — seluruh buffer yang tumpang tindih digabung jadi satu poligon zona risiko.<br><br>
+        <strong>3. Spatial join</strong> — farm berstatus Aman/Waspada yang jatuh di dalam zona itu ditandai "terpapar" meski skor individunya masih baik.<br><br>
+        <strong>4. Nearest-distance</strong> — jarak tiap farm ke farm Bahaya Tinggi terdekat dihitung (lihat saat hover titik farm).
       </div>
     </aside>
 
@@ -208,32 +224,60 @@ farms[0].score = 22;
 farms[0].lon = CENTER[0];
 farms[0].lat = CENTER[1];
 
+// ==================== SPATIAL ANALYSIS (Turf.js) ====================
+// Real client-side geoprocessing — not static styling. This mirrors the kind
+// of buffer / overlay / spatial-join operations exposed by GeoLibre's
+// Whitebox toolbox, run here via Turf.js instead.
+
+const BUFFER_KM = 3;
+const highRiskFarms = farms.filter(f => f.status === "bahaya_tinggi" || f.status === "bahaya_sedang");
+
+// 1. Buffer — 3 km radius around every elevated-risk farm
+const buffers = highRiskFarms.map(f =>
+  turf.buffer(turf.point([f.lon, f.lat]), BUFFER_KM, { units: "kilometers", steps: 48 })
+);
+
+// 2. Overlay (union) — merge overlapping buffers into one risk-zone polygon
+let riskZone = buffers[0] || null;
+for (let i = 1; i < buffers.length; i++){
+  try { riskZone = turf.union(riskZone, buffers[i]) || riskZone; }
+  catch (err) { /* skip degenerate geometry pairs, keep prior union */ }
+}
+const zoneGeoJSON = { type: "FeatureCollection", features: riskZone ? [riskZone] : [] };
+
+// 3. Spatial join — flag lower-status farms that fall inside the union zone
+farms.forEach(f => {
+  const isHighRisk = f.status === "bahaya_tinggi" || f.status === "bahaya_sedang";
+  f.exposed = !isHighRisk && riskZone ? turf.booleanPointInPolygon(turf.point([f.lon, f.lat]), riskZone) : false;
+});
+
+// 4. Nearest-distance — distance from every farm to the closest Bahaya Tinggi farm
+const criticalFarms = farms.filter(f => f.status === "bahaya_tinggi");
+farms.forEach(f => {
+  if (!criticalFarms.length){ f.distToHighRisk = null; return; }
+  const dists = criticalFarms
+    .filter(c => c.id !== f.id)
+    .map(c => turf.distance(turf.point([f.lon, f.lat]), turf.point([c.lon, c.lat]), { units: "kilometers" }));
+  f.distToHighRisk = dists.length ? Math.min(...dists) : 0;
+});
+
 const farmsGeoJSON = {
   type: "FeatureCollection",
   features: farms.map(f => ({
     type: "Feature",
     properties: { id: f.id, name: f.name, status: f.status, score: f.score,
-                  initial: STATUS[f.status].initial, color: STATUS[f.status].hex },
+                  initial: STATUS[f.status].initial, color: STATUS[f.status].hex,
+                  exposed: f.exposed, distToHighRisk: f.distToHighRisk,
+                  heatWeight: Math.max(0.05, (100 - f.score) / 100) },
     geometry: { type: "Point", coordinates: [f.lon, f.lat] },
   })),
 };
-
-// ---------- Buffer/geofence circle around the anchor high-risk farm ----------
-function makeCircle(centerLon, centerLat, radiusKm, steps = 64){
-  const coords = [];
-  const distX = radiusKm / (111.320 * Math.cos(centerLat * Math.PI / 180));
-  const distY = radiusKm / 110.574;
-  for (let i = 0; i <= steps; i++){
-    const theta = (i / steps) * 2 * Math.PI;
-    coords.push([centerLon + distX * Math.cos(theta), centerLat + distY * Math.sin(theta)]);
-  }
-  return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [coords] } };
-}
-const zoneGeoJSON = { type: "FeatureCollection", features: [makeCircle(farms[0].lon, farms[0].lat, 3)] };
+const exposedGeoJSON = { type: "FeatureCollection", features: farmsGeoJSON.features.filter(f => f.properties.exposed) };
 
 // ---------- Stat tiles ----------
 const counts = { aman:0, waspada:0, bahaya_sedang:0, bahaya_tinggi:0 };
 farms.forEach(f => counts[f.status]++);
+const exposedCount = farms.filter(f => f.exposed).length;
 const statsRow = document.getElementById("statsRow");
 const tileDefs = [
   { key: "total", cls: "", label: "Total Peternakan", value: farms.length },
@@ -241,6 +285,7 @@ const tileDefs = [
   { key: "waspada", cls: "warning", label: "Status Waspada", value: counts.waspada },
   { key: "bahaya_sedang", cls: "serious", label: "Bahaya Sedang", value: counts.bahaya_sedang },
   { key: "bahaya_tinggi", cls: "critical", label: "Bahaya Tinggi", value: counts.bahaya_tinggi },
+  { key: "exposed", cls: "exposed", label: "Terpapar (spatial join)", value: exposedCount },
 ];
 statsRow.innerHTML = tileDefs.map(t => `
   <div class="stat-tile ${t.cls}">
@@ -277,8 +322,32 @@ map.on("load", () => {
     clusterMaxZoom: 12,
   });
   map.addSource("zone", { type: "geojson", data: zoneGeoJSON });
+  map.addSource("farms-flat", { type: "geojson", data: farmsGeoJSON }); // unclustered copy, needed for heatmap
+  map.addSource("exposed", { type: "geojson", data: exposedGeoJSON });
 
-  // Buffer / geofence zone
+  // Heatmap — kernel density weighted by (100 - biosecurity score), i.e. risk intensity
+  map.addLayer({
+    id: "risk-heatmap",
+    type: "heatmap",
+    source: "farms-flat",
+    layout: { visibility: "none" },
+    paint: {
+      "heatmap-weight": ["get", "heatWeight"],
+      "heatmap-intensity": 1.1,
+      "heatmap-radius": 38,
+      "heatmap-opacity": 0.75,
+      "heatmap-color": [
+        "interpolate", ["linear"], ["heatmap-density"],
+        0,   "rgba(0,0,0,0)",
+        0.2, getVar('--seq-300'),
+        0.5, getVar('--status-warning'),
+        0.8, getVar('--status-serious'),
+        1,   getVar('--status-critical'),
+      ],
+    },
+  });
+
+  // Buffer + overlay (union) risk zone — result of the Turf.js analysis above
   map.addLayer({
     id: "zone-fill",
     type: "fill",
@@ -290,6 +359,19 @@ map.on("load", () => {
     type: "line",
     source: "zone",
     paint: { "line-color": getVar('--status-critical'), "line-width": 2, "line-dasharray": [2, 1.5] },
+  });
+
+  // Exposure ring — spatial-join result: lower-status farms inside the union zone
+  map.addLayer({
+    id: "exposed-ring",
+    type: "circle",
+    source: "exposed",
+    paint: {
+      "circle-radius": 15,
+      "circle-color": "rgba(0,0,0,0)",
+      "circle-stroke-width": 2,
+      "circle-stroke-color": getVar('--status-warning'),
+    },
   });
 
   // Clusters (sequential-magnitude encoding: single hue, light -> dark by count)
@@ -347,10 +429,13 @@ map.on("load", () => {
     map.getCanvas().style.cursor = "pointer";
     const f = e.features[0];
     const p = f.properties;
+    const distText = p.distToHighRisk == null ? "—" : (p.status === "bahaya_tinggi" ? "0.0 km (farm ini)" : p.distToHighRisk.toFixed(1) + " km");
     popup.setLngLat(f.geometry.coordinates).setHTML(`
       <div class="popup-name">${p.name}</div>
       <div class="popup-row"><span>Status</span><span class="popup-status" style="color:${p.color}">${STATUS[p.status].label}</span></div>
       <div class="popup-row"><span>Skor biosekuriti</span><span>${p.score}/100</span></div>
+      <div class="popup-row"><span>Jarak ke Bahaya Tinggi terdekat</span><span>${distText}</span></div>
+      ${p.exposed ? '<div class="popup-exposed">⚠ Terpapar zona risiko (spatial join)</div>' : ""}
     `).addTo(map);
   });
   map.on("mouseleave", "unclustered-point", () => {
@@ -378,6 +463,12 @@ map.on("load", () => {
   document.getElementById("toggleZone").addEventListener("change", (e) => {
     const vis = e.target.checked ? "visible" : "none";
     ["zone-fill", "zone-outline"].forEach(id => map.setLayoutProperty(id, "visibility", vis));
+  });
+  document.getElementById("toggleExposed").addEventListener("change", (e) => {
+    map.setLayoutProperty("exposed-ring", "visibility", e.target.checked ? "visible" : "none");
+  });
+  document.getElementById("toggleHeatmap").addEventListener("change", (e) => {
+    map.setLayoutProperty("risk-heatmap", "visibility", e.target.checked ? "visible" : "none");
   });
 });
 
