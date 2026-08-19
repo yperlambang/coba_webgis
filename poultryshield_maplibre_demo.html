@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PoultryShield — MapLibre GL Proof of Concept</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root{
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page-plane:     #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --brand:          #0F766E;
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-serious:  #ec835a;
+    --status-critical: #d03b3b;
+    --seq-300: #6da7ec;
+    --seq-450: #2a78d6;
+    --seq-600: #184f95;
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page-plane:     #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --brand:          #14b8a6;
+    --status-good:     #0ca30c;
+    --status-warning:  #fab219;
+    --status-serious:  #ec835a;
+    --status-critical: #d03b3b;
+    --seq-300: #5598e7;
+    --seq-450: #3987e5;
+    --seq-600: #184f95;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; height:100%; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--page-plane); color:var(--text-primary); }
+
+  .app{ display:flex; flex-direction:column; height:100vh; }
+
+  header{
+    padding: 14px 20px;
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+  }
+  header .titles h1{ font-size:16px; margin:0 0 2px; }
+  header .titles p{ font-size:12px; margin:0; color: var(--text-secondary); }
+  header .badge{
+    font-size:11px; font-weight:600; color:var(--brand); border:1px solid var(--brand);
+    padding:3px 8px; border-radius:999px; white-space:nowrap;
+  }
+  .theme-toggle{
+    border:1px solid var(--border); background:var(--surface-1); color:var(--text-primary);
+    border-radius:8px; padding:6px 10px; font-size:12px; cursor:pointer;
+  }
+  .header-right{ display:flex; align-items:center; gap:10px; }
+
+  .stats{
+    display:grid; grid-template-columns: repeat(5, 1fr); gap:1px;
+    background: var(--border); border-bottom: 1px solid var(--border);
+  }
+  .stat-tile{ background:var(--surface-1); padding:10px 16px; }
+  .stat-tile .value{ font-size:20px; font-weight:700; line-height:1.1; }
+  .stat-tile .label{ font-size:11px; color:var(--text-secondary); margin-top:2px; }
+  .stat-tile.good .value{ color:var(--status-good); }
+  .stat-tile.warning .value{ color:var(--status-warning); }
+  .stat-tile.serious .value{ color:var(--status-serious); }
+  .stat-tile.critical .value{ color:var(--status-critical); }
+
+  .body{ flex:1; display:flex; min-height:0; }
+
+  aside{
+    width:270px; flex-shrink:0; background:var(--surface-1); border-right:1px solid var(--border);
+    padding:14px 16px; overflow-y:auto; font-size:13px;
+  }
+  aside h2{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-muted); margin: 16px 0 8px; }
+  aside h2:first-child{ margin-top:0; }
+
+  .layer-row{ display:flex; align-items:center; gap:8px; padding:5px 0; color:var(--text-primary); }
+  .layer-row input{ accent-color: var(--brand); width:14px; height:14px; }
+
+  .legend-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
+  .legend-swatch{
+    width:16px; height:16px; border-radius:50%; flex-shrink:0; color:#fff; font-size:9px;
+    font-weight:700; display:flex; align-items:center; justify-content:center; border:2px solid var(--surface-1); box-shadow:0 0 0 1px var(--border);
+  }
+  .legend-label{ color:var(--text-primary); }
+  .legend-count{ margin-left:auto; color:var(--text-muted); font-variant-numeric: tabular-nums; }
+
+  .zone-note{
+    margin-top:4px; font-size:12px; color:var(--text-secondary); line-height:1.5;
+    background: var(--page-plane); border:1px solid var(--border); border-radius:8px; padding:10px;
+  }
+
+  #map{ flex:1; min-width:0; }
+
+  .maplibregl-popup-content{
+    background: var(--surface-1); color: var(--text-primary);
+    border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:12px;
+  }
+  .popup-name{ font-weight:700; margin-bottom:4px; }
+  .popup-row{ display:flex; justify-content:space-between; gap:12px; color:var(--text-secondary); }
+  .popup-status{ font-weight:700; }
+
+  footer{
+    padding: 8px 20px; background:var(--surface-1); border-top:1px solid var(--border);
+    font-size:11px; color:var(--text-muted);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="titles">
+      <h1>PoultryShield — Spatial Monitoring Proof of Concept</h1>
+      <p>Demo teknis MapLibre GL JS (stack yang dipakai GeoLibre) · data dummy, bukan data produksi</p>
+    </div>
+    <div class="header-right">
+      <span class="badge">MapLibre GL JS demo</span>
+      <button class="theme-toggle" id="themeToggle" type="button">Mode gelap</button>
+    </div>
+  </header>
+
+  <div class="stats" id="statsRow"></div>
+
+  <div class="body">
+    <aside>
+      <h2>Layer</h2>
+      <label class="layer-row"><input type="checkbox" id="toggleFarms" checked> Titik peternakan</label>
+      <label class="layer-row"><input type="checkbox" id="toggleCluster" checked> Pengelompokan (cluster)</label>
+      <label class="layer-row"><input type="checkbox" id="toggleZone" checked> Zona risiko (buffer 3 km)</label>
+
+      <h2>Status biosekuriti</h2>
+      <div id="legendList"></div>
+
+      <h2>Zona Risiko</h2>
+      <div class="zone-note">
+        Lingkaran merah menandai radius 3&nbsp;km dari peternakan berstatus <strong>Bahaya Tinggi</strong> — ilustrasi analisis buffer/proximity untuk estimasi potensi penyebaran antar-farm.
+      </div>
+    </aside>
+
+    <div id="map"></div>
+  </div>
+
+  <footer>
+    Contoh mandiri (self-contained) untuk pengujian di GitHub Pages · basemap: OpenFreeMap (OSM data) · dibuat sebagai bahan diskusi opsi integrasi MapLibre GL untuk PoultryShield, bukan produk akhir.
+  </footer>
+</div>
+
+<script>
+// ---------- Status palette (fixed, from design-system status roles) ----------
+const STATUS = {
+  aman:          { label: "Aman",          initial: "A", hex: getVar('--status-good')     },
+  waspada:       { label: "Waspada",       initial: "W", hex: getVar('--status-warning')  },
+  bahaya_sedang: { label: "Bahaya Sedang", initial: "S", hex: getVar('--status-serious')  },
+  bahaya_tinggi: { label: "Bahaya Tinggi", initial: "T", hex: getVar('--status-critical') },
+};
+function getVar(name){
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// ---------- Dummy farm data (fictional names, for demo only) ----------
+const CENTER = [110.55, -7.15];
+const NAMES = ["Sukamaju","Mekarsari","Sumberrejo","Karangploso","Wonosari","Tanjungrejo",
+  "Sidorejo","Banyuurip","Cipta Karya","Margomulyo","Sukorejo","Tirtomulyo","Wringinanom",
+  "Kalitengah","Ngadirejo","Sumberagung","Karangasem","Purwosari","Sidomukti","Banjarsari"];
+const STATUS_WEIGHTS = [
+  ["aman", 0.40], ["waspada", 0.30], ["bahaya_sedang", 0.20], ["bahaya_tinggi", 0.10]
+];
+function pickStatus(){
+  const r = Math.random();
+  let acc = 0;
+  for (const [key, w] of STATUS_WEIGHTS){ acc += w; if (r <= acc) return key; }
+  return "aman";
+}
+function jitter(v, spread){ return v + (Math.random() - 0.5) * spread; }
+
+const farms = [];
+for (let i = 0; i < 28; i++){
+  const status = pickStatus();
+  const scoreRange = { aman:[80,97], waspada:[60,79], bahaya_sedang:[40,59], bahaya_tinggi:[15,39] }[status];
+  farms.push({
+    id: i + 1,
+    name: "Farm " + NAMES[i % NAMES.length] + " " + (Math.floor(i / NAMES.length) + 1),
+    status,
+    score: Math.round(scoreRange[0] + Math.random() * (scoreRange[1] - scoreRange[0])),
+    lon: jitter(CENTER[0], 0.30),
+    lat: jitter(CENTER[1], 0.30),
+  });
+}
+// force at least one high-risk farm near the center, to anchor the buffer-zone illustration
+farms[0].status = "bahaya_tinggi";
+farms[0].score = 22;
+farms[0].lon = CENTER[0];
+farms[0].lat = CENTER[1];
+
+const farmsGeoJSON = {
+  type: "FeatureCollection",
+  features: farms.map(f => ({
+    type: "Feature",
+    properties: { id: f.id, name: f.name, status: f.status, score: f.score,
+                  initial: STATUS[f.status].initial, color: STATUS[f.status].hex },
+    geometry: { type: "Point", coordinates: [f.lon, f.lat] },
+  })),
+};
+
+// ---------- Buffer/geofence circle around the anchor high-risk farm ----------
+function makeCircle(centerLon, centerLat, radiusKm, steps = 64){
+  const coords = [];
+  const distX = radiusKm / (111.320 * Math.cos(centerLat * Math.PI / 180));
+  const distY = radiusKm / 110.574;
+  for (let i = 0; i <= steps; i++){
+    const theta = (i / steps) * 2 * Math.PI;
+    coords.push([centerLon + distX * Math.cos(theta), centerLat + distY * Math.sin(theta)]);
+  }
+  return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [coords] } };
+}
+const zoneGeoJSON = { type: "FeatureCollection", features: [makeCircle(farms[0].lon, farms[0].lat, 3)] };
+
+// ---------- Stat tiles ----------
+const counts = { aman:0, waspada:0, bahaya_sedang:0, bahaya_tinggi:0 };
+farms.forEach(f => counts[f.status]++);
+const statsRow = document.getElementById("statsRow");
+const tileDefs = [
+  { key: "total", cls: "", label: "Total Peternakan", value: farms.length },
+  { key: "aman", cls: "good", label: "Status Aman", value: counts.aman },
+  { key: "waspada", cls: "warning", label: "Status Waspada", value: counts.waspada },
+  { key: "bahaya_sedang", cls: "serious", label: "Bahaya Sedang", value: counts.bahaya_sedang },
+  { key: "bahaya_tinggi", cls: "critical", label: "Bahaya Tinggi", value: counts.bahaya_tinggi },
+];
+statsRow.innerHTML = tileDefs.map(t => `
+  <div class="stat-tile ${t.cls}">
+    <div class="value">${t.value}</div>
+    <div class="label">${t.label}</div>
+  </div>
+`).join("");
+
+// ---------- Legend ----------
+const legendList = document.getElementById("legendList");
+legendList.innerHTML = Object.entries(STATUS).map(([key, s]) => `
+  <div class="legend-row">
+    <div class="legend-swatch" style="background:${s.hex}">${s.initial}</div>
+    <div class="legend-label">${s.label}</div>
+    <div class="legend-count">${counts[key]}</div>
+  </div>
+`).join("");
+
+// ---------- Map ----------
+const map = new maplibregl.Map({
+  container: "map",
+  style: "https://tiles.openfreemap.org/styles/liberty",
+  center: CENTER,
+  zoom: 9,
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+map.on("load", () => {
+  map.addSource("farms", {
+    type: "geojson",
+    data: farmsGeoJSON,
+    cluster: true,
+    clusterRadius: 45,
+    clusterMaxZoom: 12,
+  });
+  map.addSource("zone", { type: "geojson", data: zoneGeoJSON });
+
+  // Buffer / geofence zone
+  map.addLayer({
+    id: "zone-fill",
+    type: "fill",
+    source: "zone",
+    paint: { "fill-color": getVar('--status-critical'), "fill-opacity": 0.12 },
+  });
+  map.addLayer({
+    id: "zone-outline",
+    type: "line",
+    source: "zone",
+    paint: { "line-color": getVar('--status-critical'), "line-width": 2, "line-dasharray": [2, 1.5] },
+  });
+
+  // Clusters (sequential-magnitude encoding: single hue, light -> dark by count)
+  map.addLayer({
+    id: "clusters",
+    type: "circle",
+    source: "farms",
+    filter: ["has", "point_count"],
+    paint: {
+      "circle-color": [
+        "step", ["get", "point_count"],
+        getVar('--seq-300'), 5,
+        getVar('--seq-450'), 10,
+        getVar('--seq-600'),
+      ],
+      "circle-radius": ["step", ["get", "point_count"], 16, 5, 20, 10, 26],
+      "circle-stroke-width": 2,
+      "circle-stroke-color": getVar('--surface-1'),
+    },
+  });
+  map.addLayer({
+    id: "cluster-count",
+    type: "symbol",
+    source: "farms",
+    filter: ["has", "point_count"],
+    layout: { "text-field": ["get", "point_count_abbreviated"], "text-size": 12, "text-font": ["Noto Sans Bold"] },
+    paint: { "text-color": "#ffffff" },
+  });
+
+  // Individual farms — colored by status, letter-coded (color never carries meaning alone)
+  map.addLayer({
+    id: "unclustered-point",
+    type: "circle",
+    source: "farms",
+    filter: ["!", ["has", "point_count"]],
+    paint: {
+      "circle-color": ["get", "color"],
+      "circle-radius": 9,
+      "circle-stroke-width": 2,
+      "circle-stroke-color": getVar('--surface-1'),
+    },
+  });
+  map.addLayer({
+    id: "unclustered-label",
+    type: "symbol",
+    source: "farms",
+    filter: ["!", ["has", "point_count"]],
+    layout: { "text-field": ["get", "initial"], "text-size": 10, "text-font": ["Noto Sans Bold"] },
+    paint: { "text-color": "#ffffff" },
+  });
+
+  // Hover tooltip
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 14 });
+  map.on("mouseenter", "unclustered-point", (e) => {
+    map.getCanvas().style.cursor = "pointer";
+    const f = e.features[0];
+    const p = f.properties;
+    popup.setLngLat(f.geometry.coordinates).setHTML(`
+      <div class="popup-name">${p.name}</div>
+      <div class="popup-row"><span>Status</span><span class="popup-status" style="color:${p.color}">${STATUS[p.status].label}</span></div>
+      <div class="popup-row"><span>Skor biosekuriti</span><span>${p.score}/100</span></div>
+    `).addTo(map);
+  });
+  map.on("mouseleave", "unclustered-point", () => {
+    map.getCanvas().style.cursor = "";
+    popup.remove();
+  });
+
+  map.on("click", "clusters", async (e) => {
+    const features = map.queryRenderedFeatures(e.point, { layers: ["clusters"] });
+    const clusterId = features[0].properties.cluster_id;
+    const zoom = await map.getSource("farms").getClusterExpansionZoom(clusterId);
+    map.easeTo({ center: features[0].geometry.coordinates, zoom });
+  });
+
+  // Layer toggles
+  document.getElementById("toggleFarms").addEventListener("change", (e) => {
+    const vis = e.target.checked ? "visible" : "none";
+    ["unclustered-point", "unclustered-label"].forEach(id => map.setLayoutProperty(id, "visibility", vis));
+    if (!document.getElementById("toggleCluster").checked) return;
+  });
+  document.getElementById("toggleCluster").addEventListener("change", (e) => {
+    const vis = e.target.checked ? "visible" : "none";
+    ["clusters", "cluster-count"].forEach(id => map.setLayoutProperty(id, "visibility", vis));
+  });
+  document.getElementById("toggleZone").addEventListener("change", (e) => {
+    const vis = e.target.checked ? "visible" : "none";
+    ["zone-fill", "zone-outline"].forEach(id => map.setLayoutProperty(id, "visibility", vis));
+  });
+});
+
+// ---------- Theme toggle ----------
+const themeToggle = document.getElementById("themeToggle");
+themeToggle.addEventListener("click", () => {
+  const root = document.documentElement;
+  const isDark = root.getAttribute("data-theme") === "dark";
+  root.setAttribute("data-theme", isDark ? "light" : "dark");
+  themeToggle.textContent = isDark ? "Mode gelap" : "Mode terang";
+});
+</script>
+</body>
+</html>
